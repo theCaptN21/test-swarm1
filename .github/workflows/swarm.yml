@@ -53,7 +53,7 @@ jobs:
       with:
         host: ${{ env.SWARM_MANAGER }}
         username: ubuntu
-        key: $${{ secrets.EC2_PEM_KEY }}
+        key: ${{ secrets.EC2_PEM_KEY }}
         script: |
           docker info | grep "Swarm: active" || docker swarm init --advertise-addr $(hostname -I | awk '{print $1}')
         debug: true
