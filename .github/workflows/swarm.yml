@@ -1,0 +1,85 @@
+name: Docker Swarm Pipeline Setup 
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  DOCKER_IMAGE: nginx:latest
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+  SWARM_MANAGER: 54.161.152.49
+  SWARM_WORKERS: 54.234.4.215,54.89.239.185
+
+jobs:
+  setup-docker-swarm:
+    name: Setup Docker Swarm and Push Image
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Check out the repo
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    # Step 2: Log in to Dockerhub
+    - name: Log in to Dockerhub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    # Step 3: Tag and push the image
+    - name: Tag and push image
+      run: |
+        docker pull nginx:latest
+        docker tag nginx:latest $DOCKERHUB_USERNAME/nginx:latest
+        docker push $DOCKERHUB_USERNAME/nginx:latest
+
+    # Step 4: Add Host Key
+    - name: Add Host Key
+      run: |
+        echo "${{ secrets.EC2_PEM_KEY }}" > /tmp/key.pem
+        chmod 600 /tmp/key.pem
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ env.SWARM_MANAGER }} >> ~/.ssh/known_hosts
+        for worker in $(echo ${{ env.SWARM_WORKERS }} | tr ',' '\n'); do
+          ssh-keyscan -H $worker >> ~/.ssh/known_hosts
+        done
+
+    # Step 5: Initialize Docker Swarm on Manager
+    - name: Initialize Docker Swarm on Manager
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ env.SWARM_MANAGER }}
+        username: ubuntu
+        key: $${{ secrets.EC2_PEM_KEY }}
+        script: |
+          docker info | grep "Swarm: active" || docker swarm init --advertise-addr $(hostname -I | awk '{print $1}')
+        debug: true
+        timeout: 120s
+
+    # Step 6: Connect workers to Swarm
+    - name: Connect works to Swarm
+      run: |
+        echo "${{ secrets.EC2_PEM_KEY }}" > /tmp/key.pem
+        chmod 600 /tmp/key.pem
+        TOKEN=$(ssh -i /tmp/key.pem ubuntu@${{ env.SWARM_MANAGER }} docker swarm join-token -q worker)
+        for worker in $(echo ${{ env.SWARM_WORKERS }} | tr ',' '\n'); do
+          ssh -i /tmp/key.pem ubuntu@$worker "
+            docker info | grep 'Swarm: active' && docker swarm leave --force || true
+            docker swarm join --token $TOKEN ${{ env.SWARM_MANAGER }}:2377
+          "
+        done
+
+    # Step 7: Deploy service to Swarm
+    - name: Deploy service to Swarm
+      uses: appleboy/ssh-action@v0.1.5
+      with:
+        host: ${{ env.SWARM_MANAGER }}
+        username: ubuntu
+        key: ${{ secrets.EC2_PEM_KEY }}
+        script: |
+          docker service create --name nginx-service --replicas 3 --publish 80:80 ${{ secrets.DOCKERHUB_USERNAME }}/nginx:latest
+        debug: true
+        timeout: 120s
